@@ -1,0 +1,113 @@
+name: fetch-db (resilient)
+
+# Fetch the ArchPOWER ppc database through a ladder of independent engines,
+# accept it only when it validates structurally and (when available) carries a
+# Good GPG signature from a pinned ArchPOWER signer, cache the last good copy,
+# and fail safe. Manual + weekly so it can act as a canary for the mirror.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Egress identity
+        run: |
+          curl -sS --max-time 20 https://ipinfo.io/json | tee /tmp/ipinfo.json || true
+          { echo "### Egress"; echo '```json'; cat /tmp/ipinfo.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Restore last-known-good
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/archpower-db
+          key: archpower-db-ppc-${{ github.run_id }}
+          restore-keys: |
+            archpower-db-ppc-
+
+      - name: Install engines (pinned)
+        run: |
+          set -e
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y zstd gnupg python3-venv
+          # curl-impersonate (BoringSSL, full browser ClientHello)
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o ci.tar.gz https://github.com/lexiforest/curl-impersonate/releases/download/v2.2.3/curl-impersonate-v2.2.3.x86_64-linux-gnu.tar.gz
+          mkdir -p ci && tar xzf ci.tar.gz -C ci
+          # curl_cffi (Python)
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip -q install --disable-pip-version-check curl_cffi
+          # node-tls-client (Go uTLS) + workerd (Cloudflare fetch stack)
+          cd "$GITHUB_WORKSPACE"
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund workerd@1.20261013.1
+          npm install --no-audit --no-fund node-tls-client@2.1.0 || echo "node-tls-client unavailable (non-fatal)"
+          node -e 'import("node-tls-client").then(()=>console.log("node-tls-client ok")).catch(e=>{console.log("node-tls-client unavailable:",e.message)})' || true
+
+      - name: Signature material
+        run: |
+          curl -fsSL -o /tmp/archpower.gpg https://raw.githubusercontent.com/kth5/archpower/master/archpower-keyring/archpower.gpg
+          curl -fsSL -o /tmp/archpower-trusted https://raw.githubusercontent.com/kth5/archpower/master/archpower-keyring/archpower-trusted
+          echo "trusted signers:"; cat /tmp/archpower-trusted
+
+      - name: Fetch through the ladder
+        env:
+          CI_DIR: ${{ runner.temp }}/ci
+          PYTHON: /tmp/venv/bin/python
+          KEYRING: /tmp/archpower.gpg
+          TRUSTED: /tmp/archpower-trusted
+          OUT: base.db
+          ALLOW_INSECURE: "0"
+        run: |
+          set -e
+          CACHE_DIR="$HOME/.cache/archpower-db"
+          export CACHE_DIR
+          mkdir -p "$CACHE_DIR"
+          RELAY_TOKEN="$(curl -sS -X POST https://tcp.ssh.relay.ajam.dev/v1/mint -H 'content-type: application/json' -d '{}' | jq -r .token)"
+          export RELAY_TOKEN
+          set +e
+          bash fetch_db.sh
+          rc=$?
+          echo "fetch_db rc=$rc"
+          { echo "### Ladder"; echo '```'; cat fetch-summary.tsv; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "rc=$rc" >> /tmp/fetch.rc
+          exit $rc
+
+      - name: Save last-known-good
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/archpower-db
+          key: archpower-db-ppc-${{ github.run_id }}
+
+      - name: Verify the accepted file independently
+        if: always()
+        run: |
+          if [ -s base.db ]; then
+            echo "size: $(wc -c < base.db)"
+            echo "sha256: $(sha256sum base.db | awk '{print $1}')"
+            gpg --batch --quiet --import /tmp/archpower.gpg
+            gpg --batch --verify base.db.sig base.db 2>&1 | sed -n '1,4p' || true
+            tar --zstd -tf base.db | grep -m1 '^pacman-' || true
+          else
+            echo "no base.db produced"
+          fi
+
+      - name: Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archpower-ppc-base-db
+          path: |
+            base.db
+            base.db.sig
+            fetch-summary.tsv
+          if-no-files-found: warn

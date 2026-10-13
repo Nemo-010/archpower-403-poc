@@ -1,2 +1,6 @@
 node_modules/
 *.log
+base.db
+base.db.sig
+fetch-summary.tsv
+.cache/
