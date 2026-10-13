@@ -71,6 +71,9 @@ verify_sig() { # <file>
 # --- databases ----------------------------------------------------------------
 for path in "$REPO/$ARCH/$REPO.db" "$REPO/any/$REPO-any.db"; do
   db="$(basename "$path")"
+  # The databases are always refetched; SKIP_FETCH exists for the packages,
+  # which are the expensive part of a staged run.
+  rm -f "$STAGE/$db" "$STAGE/$db.sig"
   if fetch "$path" "$STAGE/$db" 2>/dev/null; then
     fetch "$path.sig" "$STAGE/$db.sig" 2>/dev/null || true
     say "fetched $path ($(wc -c < "$STAGE/$db") bytes)"
@@ -97,6 +100,12 @@ python3 "$HERE/enumerate.py" "${srcargs[@]}" "${pkgargs[@]}" > "$STAGE/index.par
   || die "could not enumerate the closure"
 say "closure: $(wc -l < "$STAGE/index.part") packages"
 
+# OCI arguments treat `path:type` specially, and an Arch epoch puts a colon in
+# the filename (iptables-1:nftables-...). Stage under an escaped name; index.tsv
+# keeps the real one, and the wrapper pulls by digest, so the layer title is only
+# for a human reading the artifact.
+safe_name() { printf '%s' "$1" | sed 's/:/%3A/g'; }
+
 fetched=0
 while IFS=$'\t' read -r prefix fn sha size; do
   [ -n "$fn" ] || continue
@@ -104,10 +113,11 @@ while IFS=$'\t' read -r prefix fn sha size; do
     say "MAX_FILES=$MAX_FILES reached, stopping"
     break
   fi
-  fetch "$prefix/$fn" "$dir/$fn"
-  fetch "$prefix/$fn.sig" "$dir/$fn.sig"
-  verify_sig "$dir/$fn" || die "refusing to mirror a package whose signature is not trusted"
-  got="$(sha256sum "$dir/$fn" | cut -d' ' -f1)"
+  sfile="$(safe_name "$fn")"
+  fetch "$prefix/$fn" "$dir/$sfile"
+  fetch "$prefix/$fn.sig" "$dir/$sfile.sig"
+  verify_sig "$dir/$sfile" || die "refusing to mirror a package whose signature is not trusted"
+  got="$(sha256sum "$dir/$sfile" | cut -d' ' -f1)"
   [ "$got" = "$sha" ] || die "$fn: sha256 $got != database $sha"
   fetched=$((fetched + 1))
   say "  ok $fn"
@@ -117,7 +127,8 @@ done < "$STAGE/index.part"
 {
   echo "# url-path	filename	sha256	size"
   while IFS=$'\t' read -r prefix fn sha size; do
-    [ -f "$dir/$fn" ] && printf '%s\t%s\t%s\t%s\n' "$prefix" "$fn" "$sha" "$size"
+    [ -f "$dir/$(safe_name "$fn")" ] \
+      && printf '%s\t%s\t%s\t%s\n' "$prefix" "$fn" "$sha" "$size"
   done < "$STAGE/index.part"
 } > "$dir/index.tsv"
 say "index: $(($(wc -l < "$dir/index.tsv") - 1)) files"
@@ -128,9 +139,15 @@ if [ "${PUSH:-1}" = "0" ]; then
   exit 0
 fi
 command -v oras >/dev/null 2>&1 || die "oras is not on PATH"
-# Only the files this run actually fetched, so a staged run pushes a stage.
-mapfile -t files < <(cd "$dir" && ls -1 | grep -v '^index.tsv$')
+# Exactly the files the index names, so a stage pushes its own slice and a
+# restored stage cannot drag in a file that is no longer part of the closure.
+mapfile -t files < <(
+  tail -n +2 "$dir/index.tsv" | while IFS=$'\t' read -r p fn sha size; do
+    s="$(safe_name "$fn")"
+    [ -f "$dir/$s" ] && printf '%s\n%s.sig\n' "$s" "$s"
+  done
+)
 ( cd "$dir" && oras push "$REF" \
     --artifact-type application/vnd.pkgforge.archpower.mirror.v1 \
-    "${files[@]/#/}" index.tsv )
+    "${files[@]}" index.tsv )
 say "pushed $REF"

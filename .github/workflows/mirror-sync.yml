@@ -34,8 +34,19 @@ jobs:
       REPO: ${{ inputs.repo || 'base' }}
       ARCH: ${{ inputs.arch || 'powerpc' }}
       MAX_FILES: ${{ inputs.max_files || '0' }}
+      SKIP_FETCH: "1"
     steps:
       - uses: actions/checkout@v4
+
+      # The packages are the expensive part; a re-run of the same repository
+      # reuses what an earlier run already fetched and verified. The databases
+      # are always refetched, so a restored stage cannot pin a stale closure.
+      - uses: actions/cache@v4
+        with:
+          path: stage
+          key: mirror-${{ github.repository_owner }}-${{ inputs.repo || 'base' }}-${{ inputs.arch || 'powerpc' }}
+          restore-keys: |
+            mirror-${{ github.repository_owner }}-${{ inputs.repo || 'base' }}-
 
       - uses: actions/setup-node@v4
         with:
