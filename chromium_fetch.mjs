@@ -1,6 +1,8 @@
 #!/usr/bin/env node
-// Tier 2: a real Chromium solves whatever the origin serves, then its cookie jar
-// (including cf_clearance) is used to fetch the raw bytes.
+// Tier 2: a real Chromium solves whatever the origin serves, then fetches the
+// bytes with the browser's OWN network stack (an in-page fetch), not with
+// Playwright's Node-side request context, which has a non-browser TLS
+// ClientHello and is blocked for exactly that reason.
 //
 //   node chromium_fetch.mjs <url> <out> [referer]
 //
@@ -34,6 +36,7 @@ try {
     locale: "en-US",
     timezoneId: "UTC",
     viewport: { width: 1366, height: 768 },
+    acceptDownloads: true,
   });
   if (stealth) {
     await context.addInitScript(() => {
@@ -61,16 +64,27 @@ try {
     console.error(`chromium_fetch: origin visit: ${e.message}`);
   }
 
-  const resp = await context.request.get(url, { timeout: 180000 });
-  const status = resp.status();
-  const body = status === 200 ? await resp.body() : Buffer.alloc(0);
-  if (status === 200) fs.writeFileSync(out, body);
+  // The browser's own fetch, so its TLS/H2 fingerprint and cookies apply.
+  const r = await page.evaluate(async (u) => {
+    const resp = await fetch(u, { credentials: "include", cache: "no-store" });
+    if (!resp.ok) return { status: resp.status };
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    let s = "";
+    for (let i = 0; i < buf.length; i += 0x8000) {
+      s += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+    }
+    return { status: resp.status, b64: btoa(s) };
+  }, url);
+
+  if (r.status === 200 && r.b64) {
+    fs.writeFileSync(out, Buffer.from(r.b64, "base64"));
+  }
   const seenUA = await page.evaluate(() => navigator.userAgent).catch(() => "?");
   const wd = await page.evaluate(() => navigator.webdriver).catch(() => "?");
   console.log(
     JSON.stringify({
-      status,
-      bytes: body.length,
+      status: r.status,
+      bytes: r.b64 ? Buffer.byteLength(r.b64, "base64") : 0,
       challenged,
       title,
       ua: seenUA,
@@ -79,7 +93,7 @@ try {
       stealth,
     })
   );
-  process.exit(status === 200 ? 0 : 1);
+  process.exit(r.status === 200 ? 0 : 1);
 } finally {
   await browser.close();
 }
