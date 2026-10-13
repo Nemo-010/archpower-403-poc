@@ -1,0 +1,68 @@
+name: chromium-matrix
+# Can any Chromium configuration get through from a blocked runner, and does it
+# beat the plain-curl control? Manual only.
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: powerpc | powerpc64 | powerpc64le
+        default: powerpc
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Egress
+        run: curl -sSL --max-time 30 https://ipinfo.io/json | tee /tmp/egress.json
+
+      - name: Install Playwright (full + shell)
+        run: |
+          npm i --no-audit --no-fund playwright@latest
+          npx playwright install --with-deps chromium chromium-headless-shell
+
+      - name: Control - plain curl
+        run: |
+          code=$(curl -sS -o /tmp/plain.bin -w '%{http_code}' --connect-timeout 10 --max-time 60 \
+            "https://repo.archlinuxpower.org/base/${{ inputs.arch }}/base.db" || true)
+          echo "{\"config\":\"plain-curl\",\"status\":$code,\"bytes\":$(wc -c < /tmp/plain.bin)}"
+
+      - name: Matrix
+        env:
+          URL: https://repo.archlinuxpower.org/base/${{ inputs.arch }}/base.db
+          UA: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36
+        run: |
+          set -u
+          run() {
+            name=$1; shift
+            echo "----- $name -----"
+            if "$@" node chromium_fetch.mjs "$URL" "/tmp/$name.bin"; then
+              echo "  sha256 $(sha256sum /tmp/$name.bin | cut -d' ' -f1)"
+            fi
+            echo "  rc=$?"
+          }
+          run shell            env CHROME_WAIT=20
+          run full             env CHROME_FULL=1 CHROME_WAIT=20
+          run full-ua          env CHROME_FULL=1 CHROME_WAIT=30 CHROME_UA="$UA"
+          run full-ua-stealth  env CHROME_FULL=1 CHROME_WAIT=30 CHROME_STEALTH=1 CHROME_UA="$UA"
+        continue-on-error: true
+
+      - name: curl-impersonate control (known to pass)
+        run: |
+          curl -sSL --max-time 60 -o /tmp/curl-imp.tar.gz https://github.com/lwthiker/curl-impersonate/releases/download/v0.6.1/curl-impersonate-v0.6.1.x86_64-linux-gnu.tar.gz || \
+          curl -sSL --max-time 60 -o /tmp/curl-imp.tar.gz https://github.com/lexiforest/curl-impersonate/releases/download/v1.0.0/curl-impersonate-v1.0.0.x86_64-linux-gnu.tar.gz
+          ls -la /tmp/curl-imp.tar.gz || true
+          tar -xzf /tmp/curl-imp.tar.gz -C /tmp 2>/dev/null || true
+          chmod +x /tmp/curl_chrome* /tmp/curl-impersonate 2>/dev/null || true
+          code=$(/tmp/curl_chrome136 -sS -o /tmp/ci.bin -w '%{http_code}' --max-time 60 "$URL" 2>/dev/null || true)
+          echo "curl-impersonate $code bytes=$(wc -c < /tmp/ci.bin 2>/dev/null || echo 0)"
+        env:
+          URL: https://repo.archlinuxpower.org/base/${{ inputs.arch }}/base.db
+        continue-on-error: true

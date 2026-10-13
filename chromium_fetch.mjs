@@ -4,7 +4,11 @@
 //
 //   node chromium_fetch.mjs <url> <out> [referer]
 //
-// Nothing here synthesises a fingerprint: this is the browser.
+// Env:
+//   CHROME_FULL=1     use the full Chrome-for-Testing build, new headless mode
+//   CHROME_UA=...     override the user agent
+//   CHROME_STEALTH=1  drop the automation tells Playwright leaves behind
+//   CHROME_WAIT=...   seconds to wait out a challenge (default 30)
 import { chromium } from "playwright";
 import fs from "node:fs";
 
@@ -14,26 +18,41 @@ if (!url || !out) {
   process.exit(2);
 }
 const origin = new URL(referer || url).origin;
+const full = process.env.CHROME_FULL === "1";
+const stealth = process.env.CHROME_STEALTH === "1";
+const ua = process.env.CHROME_UA || undefined;
+const waitS = Number(process.env.CHROME_WAIT || 30);
 
-const browser = await chromium.launch({
-  headless: true,
-  args: ["--no-sandbox", "--disable-dev-shm-usage"],
-});
+const args = ["--no-sandbox", "--disable-dev-shm-usage"];
+if (stealth) args.push("--disable-blink-features=AutomationControlled");
+
+const launch = full ? { channel: "chromium", args } : { args };
+const browser = await chromium.launch({ headless: true, ...launch });
 try {
   const context = await browser.newContext({
+    userAgent: ua,
     locale: "en-US",
     timezoneId: "UTC",
     viewport: { width: 1366, height: 768 },
   });
+  if (stealth) {
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      window.chrome = window.chrome || { runtime: {} };
+      Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
+      Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
+    });
+  }
   const page = await context.newPage();
 
-  // Visit the origin first so any challenge runs and sets its cookie.
   let challenged = false;
+  let title = "";
   try {
     await page.goto(origin, { waitUntil: "domcontentloaded", timeout: 60000 });
-    for (let i = 0; i < 20; i++) {
-      const t = await page.title();
-      if (/just a moment|attention required|checking your browser|verify/i.test(t)) {
+    const deadline = Date.now() + waitS * 1000;
+    while (Date.now() < deadline) {
+      title = await page.title().catch(() => "");
+      if (/just a moment|attention required|checking your browser|verify|one more step/i.test(title)) {
         challenged = true;
         await page.waitForTimeout(2000);
       } else break;
@@ -43,15 +62,24 @@ try {
   }
 
   const resp = await context.request.get(url, { timeout: 180000 });
-  if (resp.status() !== 200) {
-    console.error(`chromium_fetch: status ${resp.status()} (challenged=${challenged})`);
-    process.exit(1);
-  }
-  const body = await resp.body();
-  fs.writeFileSync(out, body);
-  console.error(
-    `chromium_fetch: 200, ${body.length} bytes, challenged=${challenged}, ua=${await page.evaluate(() => navigator.userAgent)}`
+  const status = resp.status();
+  const body = status === 200 ? await resp.body() : Buffer.alloc(0);
+  if (status === 200) fs.writeFileSync(out, body);
+  const seenUA = await page.evaluate(() => navigator.userAgent).catch(() => "?");
+  const wd = await page.evaluate(() => navigator.webdriver).catch(() => "?");
+  console.log(
+    JSON.stringify({
+      status,
+      bytes: body.length,
+      challenged,
+      title,
+      ua: seenUA,
+      webdriver: wd,
+      full,
+      stealth,
+    })
   );
+  process.exit(status === 200 ? 0 : 1);
 } finally {
   await browser.close();
 }
