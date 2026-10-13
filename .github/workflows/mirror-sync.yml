@@ -1,0 +1,82 @@
+name: mirror-sync
+
+# Mirror one ArchPOWER repository/architecture into GHCR, fetching through a
+# real Chromium because that is the only client that gets a 200 from a runner.
+# Nothing here ships; the artifact is what a build or an image reads instead of
+# the origin. See README.md for what was measured.
+#
+# Weekly, plus manual. A full run over a whole repository is staged: set
+# max_files and offset to push it in slices.
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: repository name
+        default: base
+      arch:
+        description: powerpc | powerpc64 | powerpc64le
+        default: powerpc
+      max_files:
+        description: stop after N packages (0 = the whole closure)
+        default: "0"
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      NS: ${{ github.repository_owner }}
+      REPO: ${{ inputs.repo || 'base' }}
+      ARCH: ${{ inputs.arch || 'powerpc' }}
+      MAX_FILES: ${{ inputs.max_files || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Playwright Chromium
+        run: |
+          npm i --no-audit --no-fund playwright@latest
+          npx playwright install --with-deps chromium
+
+      - uses: oras-project/setup-oras@v1
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Who are we from here
+        run: curl -sSL --max-time 30 https://ipinfo.io/json
+
+      - name: Sync
+        run: |
+          export NS="$(echo "$NS" | tr 'A-Z' 'a-z')"
+          bash mirror/sync.sh "$REPO" "$ARCH"
+          echo "NS=$NS" >> "$GITHUB_ENV"
+
+      - name: Verify from a cold pull
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REF="ghcr.io/$NS/archpower-$REPO:$ARCH"
+          mkdir -p /tmp/pull && cd /tmp/pull
+          oras pull "$REF"
+          echo "--- pulled ---"; ls -la | head
+          gpg --batch --import "$GITHUB_WORKSPACE/mirror/keys/archpower.gpg" 2>/dev/null
+          gpg --batch --verify base.db.sig base.db && echo "database signature: GOOD"
+          echo "index rows: $(($(wc -l < index.tsv) - 1))"
+
+          echo "--- the wrapper, against the same registry ---"
+          cd "$GITHUB_WORKSPACE"
+          url="https://repo.archlinuxpower.org/$REPO/$ARCH/base.db"
+          GHCR_NS="$NS" GHCR_ARCH="$ARCH" GHCR_TOKEN="$TOKEN" \
+            sh mirror/ghcr-fetch "$url" /tmp/wrapper.db
+          cmp /tmp/wrapper.db /tmp/pull/base.db && echo "wrapper byte-identical"
+          sha256sum /tmp/wrapper.db | cut -c1-24
