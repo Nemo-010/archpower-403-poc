@@ -28,7 +28,11 @@ One runner, one source address, one URL
 | full Chromium, Chrome user agent | 200 | 741171 |
 | curl-impersonate `chrome136` | 200 | 741171 |
 | curl_cffi `chrome` | 200 | 741171 |
-| node-tls-client `chrome_131` | 200 | 741171 |
+| node-tls-client `chrome_131` | 403 | 0 |
+
+`node-tls-client` returns 200 from a residential network and 403 from a
+runner (run `38421222856`); the other three return 200 from both. The
+`.github/workflows/fetchers.yml` probe prints this table from a runner.
 
 Two properties determine the result, and both are required:
 

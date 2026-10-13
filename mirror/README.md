@@ -21,7 +21,11 @@ One runner, one source address, `base.db`, run `38410453428`:
 | **full Chromium, Chrome user agent** | **200** | **741171** |
 | curl-impersonate `chrome136` | 200 | 741171 |
 | curl_cffi `chrome` | 200 | 741171 |
-| node-tls-client `chrome_131` | 200 | 741171 |
+| node-tls-client `chrome_131` | 403 | 0 |
+
+`node-tls-client` returns 200 from a residential network and 403 from a runner
+(run `38421222856`); Chromium, curl-impersonate and curl_cffi return 200 from
+both. `fetchers.yml` prints this table from a runner.
 
 Two properties are load-bearing:
 

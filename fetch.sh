@@ -34,6 +34,7 @@ SUMMARY="${SUMMARY:-fetch-summary.tsv}"
 CLIENTS="${CLIENTS-chromium curl-impersonate curl-cffi tls-client}"
 RETRIES="${RETRIES:-3}"
 ALLOW_INSECURE="${ALLOW_INSECURE:-0}"
+PYTHON="${PYTHON:-python3}"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"; [ -n "${GPGHOME:-}" ] && rm -rf "$GPGHOME"' EXIT
@@ -95,7 +96,7 @@ client_available() {
                          && node -e 'import("playwright").then(()=>process.exit(0),()=>process.exit(1))' 2>/dev/null ;;
     curl-impersonate)  [ -n "${CURL_IMPERSONATE_DIR:-}" ] \
                          && [ -x "$CURL_IMPERSONATE_DIR/${CURL_IMPERSONATE_BIN:-curl_chrome136}" ] ;;
-    curl-cffi)         [ -n "${PYTHON:-}" ] && [ -f "$HERE/fetchers/curl_cffi_fetch.py" ] ;;
+    curl-cffi)         command -v "$PYTHON" >/dev/null 2>&1 && [ -f "$HERE/fetchers/curl_cffi_fetch.py" ] ;;
     tls-client)        command -v node >/dev/null 2>&1 && [ -f "$HERE/fetchers/tls_client_fetch.mjs" ] ;;
     *) return 1 ;;
   esac
