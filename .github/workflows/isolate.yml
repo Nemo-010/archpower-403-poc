@@ -1,0 +1,120 @@
+name: archpower-403-isolate
+
+# Same source IP (the GitHub runner), one variable changed per row: HTTP headers,
+# TLS 1.2 cipher list, TLS 1.3 ciphersuites, ALPN/HTTP2, or the full ClientHello.
+# This decides whether the Cloudflare 403 is keyed on the IP range or on the
+# client fingerprint.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  isolate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Runner egress identity
+        run: |
+          curl -sS --max-time 20 https://ipinfo.io/json | tee /tmp/ipinfo.json || true
+          { echo "### Egress"; echo '```json'; cat /tmp/ipinfo.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: What the 403 body is
+        run: |
+          TARGET='https://repo.archlinuxpower.org/base/powerpc/base.db'
+          curl -sS --max-time 60 -o /tmp/403.html -D /tmp/403.hdr "$TARGET" || true
+          echo "--- response headers ---"; cat /tmp/403.hdr
+          echo "--- body markers ---"
+          grep -o -i -E 'Just a moment|cf-chl[a-z-]*|challenge-platform|Enable JavaScript and cookies|cf_chl_opt|window\.__CF\$cv\$params|error code: [0-9]+' /tmp/403.html | sort -u | head -20
+          echo "byte length: $(wc -c < /tmp/403.html)"
+          { echo "### 403 body markers"; echo '```'; cat /tmp/403.hdr; echo; grep -o -i -E 'Just a moment|challenge-platform|error code: [0-9]+' /tmp/403.html | sort -u; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: System curl isolation (headers vs TLS ciphers)
+        run: |
+          set -u
+          TARGET='https://repo.archlinuxpower.org/base/powerpc/base.db'
+          H=(
+            -H 'sec-ch-ua: "Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"'
+            -H 'sec-ch-ua-mobile: ?0'
+            -H 'sec-ch-ua-platform: "macOS"'
+            -H 'Upgrade-Insecure-Requests: 1'
+            -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36'
+            -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7'
+            -H 'Sec-Fetch-Site: none' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-User: ?1' -H 'Sec-Fetch-Dest: document'
+            -H 'Accept-Encoding: gzip, deflate, br, zstd' -H 'Accept-Language: en-US,en;q=0.9' -H 'Priority: u=0, i'
+          )
+          CIPHERS='ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA:AES256-SHA'
+          TLS13='TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256'
+          p() {
+            local label="$1"; shift
+            local code
+            code="$(curl -sS --max-time 60 -o /dev/null -w '%{http_code}' "$TARGET" "$@" 2>/dev/null || echo ERR)"
+            printf '%-30s status=%s\n' "$label" "$code"
+          }
+          {
+            echo "### System curl isolation (OpenSSL)"
+            p "curl-plain"
+            p "curl-chrome-headers" "${H[@]}"
+            p "curl-chrome-ciphers" "${H[@]}" --ciphers "$CIPHERS" --tls13-ciphers "$TLS13" --curves 'X25519:P-256:P-384'
+            p "curl-browser-ciphers-no-headers" --ciphers "$CIPHERS" --tls13-ciphers "$TLS13" --curves 'X25519:P-256:P-384'
+          } | tee /tmp/iso-curl.txt
+          cat /tmp/iso-curl.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: curl-impersonate isolation (full browser ClientHello, H2 on/off)
+        run: |
+          set -e
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o ci.tar.gz https://github.com/lexiforest/curl-impersonate/releases/download/v2.2.3/curl-impersonate-v2.2.3.x86_64-linux-gnu.tar.gz
+          mkdir -p ci && tar xzf ci.tar.gz -C ci
+          cd "$GITHUB_WORKSPACE"
+          TARGET='https://repo.archlinuxpower.org/base/powerpc/base.db'
+          {
+            echo "### curl-impersonate (BoringSSL browser ClientHello)"
+            for b in curl_chrome136 curl_chrome131 curl_firefox135 curl_safari172_ios; do
+              code="$("$RUNNER_TEMP/ci/$b" -s -o /dev/null -w '%{http_code}' --max-time 60 "$TARGET" 2>/dev/null || echo ERR)"
+              printf '%-30s status=%s\n' "$b" "$code"
+            done
+            code="$("$RUNNER_TEMP/ci/curl_chrome136" -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 60 "$TARGET" 2>/dev/null || echo ERR)"
+            printf '%-30s status=%s\n' "curl_chrome136-http1.1" "$code"
+          } | tee /tmp/iso-imp.txt
+          cat /tmp/iso-imp.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Node userspace TLS isolation (ciphers/curves/ALPN only)
+        run: |
+          {
+            echo "### Node TLS direct (no relay, no curl)"
+            for prof in node node12 chrome chrome_h2 firefox safari; do
+              node node_tls_direct.mjs "$prof" || true
+            done
+          } | tee /tmp/iso-node.txt
+          cat /tmp/iso-node.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: workerd (Cloudflare fetch stack, rv worker verbatim)
+        run: |
+          set -e
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund workerd@1.20261013.1
+          ./node_modules/.bin/workerd serve config.capnp >/tmp/workerd.log 2>&1 &
+          WK=$!
+          sleep 5
+          code="$(curl -sS -o /tmp/wk.body -D /tmp/wk.hdr -w '%{http_code}' --max-time 60 'http://127.0.0.1:8787/https://repo.archlinuxpower.org/base/powerpc/base.db' || echo ERR)"
+          echo "workerd status=$code cf-ray=$(awk 'tolower($1)=="cf-ray:"{print $2}' /tmp/wk.hdr | tr -d '\r')" | tee /tmp/iso-workerd.txt
+          kill "$WK" 2>/dev/null || true
+          { echo "### workerd"; echo '```'; cat /tmp/iso-workerd.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: b-ids reference identity (UA and header order are real, not the gate)
+        run: |
+          set -u
+          UA="$(curl -fsSL --max-time 30 https://raw.githubusercontent.com/Azathothas/b-ids/data/routes/user-agent/chrome/stable/latest/linux64/navigate.txt)"
+          echo "b-ids Chrome stable UA: $UA"
+          echo "b-ids header order:"
+          curl -fsSL --max-time 30 https://raw.githubusercontent.com/Azathothas/b-ids/data/routes/header-order/chrome/stable/latest/linux64/navigate.list.txt
+          code="$(curl -sS --max-time 60 -o /dev/null -w '%{http_code}' -A "$UA" 'https://repo.archlinuxpower.org/base/powerpc/base.db' || echo ERR)"
+          echo "system curl with b-ids Chrome UA only: status=$code"
+          { echo "### b-ids"; echo '```'; echo "UA: $UA"; echo "curl with UA only: $code"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
