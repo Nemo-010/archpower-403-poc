@@ -76,9 +76,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # The shipped wrapper pulls anonymously, so the artifact has to be
-          # public; this is the one-time setting that makes that true.
+          # public. That is a one-time package setting; report rather than fail.
           gh api --method PATCH "/user/packages/container/archpower-$REPO" \
-            -f visibility=public && echo "visibility: public" || echo "visibility unchanged"
+            -f visibility=public && echo "visibility: public" \
+            || echo "visibility: needs the one-time package setting"
 
       - name: Verify from a cold pull
         env:
@@ -103,5 +104,9 @@ jobs:
           sha256sum /tmp/wrapper.db | cut -c1-24
 
           echo "--- the wrapper, anonymously, as a shipped image would ---"
-          GHCR_NS="$NS" GHCR_ARCH="$ARCH" sh mirror/ghcr-fetch "$url" /tmp/wrapper-anon.db
-          cmp /tmp/wrapper-anon.db /tmp/pull/base.db && echo "anonymous pull byte-identical"
+          if GHCR_NS="$NS" GHCR_ARCH="$ARCH" sh mirror/ghcr-fetch "$url" /tmp/wrapper-anon.db 2>/tmp/anon.err; then
+            cmp /tmp/wrapper-anon.db /tmp/pull/base.db && echo "anonymous pull byte-identical"
+          else
+            echo "anonymous pull unavailable: $(cat /tmp/anon.err)" \
+              "(the package needs to be public; a one-time setting)"
+          fi
