@@ -83,6 +83,14 @@ for path in "$REPO/$ARCH/$REPO.db" "$REPO/any/$REPO-any.db"; do
   fi
 done
 
+# The databases are the other half of a repository: pacman -Sy fetches them
+# from the same Server, so they belong in the artifact and in the index.
+for db in "$REPO.db" "$REPO-any.db"; do
+  [ -s "$STAGE/$db" ] || continue
+  cp -f "$STAGE/$db" "$dir/$db"
+  [ -s "$STAGE/$db.sig" ] && cp -f "$STAGE/$db.sig" "$dir/$db.sig"
+done
+
 # --- the closure --------------------------------------------------------------
 dbs=()
 for db in "$STAGE/$REPO.db" "$STAGE/$REPO-any.db"; do [ -s "$db" ] && dbs+=("$db"); done
@@ -126,6 +134,12 @@ done < "$STAGE/index.part"
 # --- index --------------------------------------------------------------------
 {
   echo "# url-path	filename	sha256	size"
+  for db in "$REPO.db" "$REPO-any.db"; do
+    [ -s "$STAGE/$db" ] || continue
+    case "$db" in *-any.db) p="$REPO/any" ;; *) p="$REPO/$ARCH" ;; esac
+    printf '%s\t%s\t%s\t%s\n' "$p" "$db" \
+      "$(sha256sum "$STAGE/$db" | cut -d' ' -f1)" "$(wc -c < "$STAGE/$db")"
+  done
   while IFS=$'\t' read -r prefix fn sha size; do
     [ -f "$dir/$(safe_name "$fn")" ] \
       && printf '%s\t%s\t%s\t%s\n' "$prefix" "$fn" "$sha" "$size"
