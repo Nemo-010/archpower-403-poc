@@ -7,6 +7,11 @@ name: fetch-db (resilient)
 
 on:
   workflow_dispatch:
+    inputs:
+      engine_order:
+        description: "space separated engine order (curl-impersonate curl-cffi tls-client workerd relay)"
+        required: false
+        default: "curl-impersonate curl-cffi tls-client workerd relay"
   schedule:
     - cron: "17 4 * * 1"
 
@@ -65,6 +70,7 @@ jobs:
           KEYRING: /tmp/archpower.gpg
           TRUSTED: /tmp/archpower-trusted
           OUT: base.db
+          ENGINE_ORDER: ${{ github.event.inputs.engine_order || 'curl-impersonate curl-cffi tls-client workerd relay' }}
           ALLOW_INSECURE: "0"
         run: |
           set -e
