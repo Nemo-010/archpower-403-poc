@@ -6,8 +6,6 @@ name: archpower-403-repeat
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
 
 permissions:
   contents: read

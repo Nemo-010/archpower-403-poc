@@ -7,8 +7,6 @@ name: archpower-403-isolate
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
 
 permissions:
   contents: read
