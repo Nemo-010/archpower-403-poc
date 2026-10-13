@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Enumerate the packages a `pacman -Sy base archpower-keyring` actually
-downloads, and print a TSV index that also says where each file lives:
+# SPDX-License-Identifier: 0BSD
+"""Print the download closure of a repository as a TSV index.
 
     <url-path>\t<filename>\t<sha256>\t<compressed-size>
 
-`base` in ArchPOWER is a real metapackage, not a group, so the download set is
-its transitive closure through %DEPENDS%, with %PROVIDES% honoured. The two
-databases live under different paths (`base/powerpc` and `base/any`), which is
-why the source is passed in with each one and carried through to the output.
+The closure is resolved from the databases through %DEPENDS%, with %PROVIDES%
+honoured. `base` in ArchPOWER is a metapackage, not a group, so the download
+set is its transitive closure. The two databases live under different paths
+(`base/powerpc` and `base/any`), so each source is named on the command line and
+carried through to the output.
 
     enumerate.py --source base/powerpc base.db --source base/any base-any.db
 """

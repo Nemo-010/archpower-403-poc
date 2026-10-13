@@ -1,12 +1,11 @@
 name: mirror-sync
-
-# Mirror one ArchPOWER repository/architecture into GHCR, fetching through a
-# real Chromium because that is the only client that gets a 200 from a runner.
-# Nothing here ships; the artifact is what a build or an image reads instead of
-# the origin. See README.md for what was measured.
+# SPDX-License-Identifier: 0BSD
 #
-# Weekly, plus manual. A full run over a whole repository is staged: set
-# max_files and offset to push it in slices.
+# Publish one ArchPOWER repository/architecture as an OCI artifact.
+#
+# Weekly and manual. A run over a repository larger than a runner's disk is
+# sliced: set max_files and run it more than once. The Actions cache carries the
+# files a run has already verified, and the databases are always refetched.
 on:
   workflow_dispatch:
     inputs:
@@ -38,9 +37,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The packages are the expensive part; a re-run of the same repository
-      # reuses what an earlier run already fetched and verified. The databases
-      # are always refetched, so a restored stage cannot pin a stale closure.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - uses: actions/cache@v4
         with:
           path: stage
@@ -48,22 +48,15 @@ jobs:
           restore-keys: |
             mirror-${{ github.repository_owner }}-${{ inputs.repo || 'base' }}-
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Install Playwright Chromium
+      - name: Install the Chromium client
         run: |
           npm i --no-audit --no-fund playwright@latest
           npx playwright install --with-deps chromium
 
       - uses: oras-project/setup-oras@v1
 
-      - name: Log in to GHCR
+      - name: Log in to the registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-      - name: Who are we from here
-        run: curl -sSL --max-time 30 https://ipinfo.io/json
 
       - name: Sync
         run: |
@@ -71,12 +64,13 @@ jobs:
           bash mirror/sync.sh "$REPO" "$ARCH"
           echo "NS=$NS" >> "$GITHUB_ENV"
 
-      - name: Make the mirror public
+      - name: Set the package public
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # The shipped wrapper pulls anonymously, so the artifact has to be
-          # public. That is a one-time package setting; report rather than fail.
+          # The client pulls anonymously, so the package has to be public. This
+          # is a one-time package setting; report rather than fail when the
+          # workflow token cannot change it.
           gh api --method PATCH "/user/packages/container/archpower-$REPO" \
             -f visibility=public && echo "visibility: public" \
             || echo "visibility: needs the one-time package setting"
@@ -95,18 +89,17 @@ jobs:
           gpg --batch --verify base.db.sig base.db && echo "database signature: GOOD"
           echo "index rows: $(($(wc -l < index.tsv) - 1))"
 
-          echo "--- the wrapper, against the same registry ---"
+          echo "--- client, with a token ---"
           cd "$GITHUB_WORKSPACE"
           url="https://repo.archlinuxpower.org/$REPO/$ARCH/base.db"
           GHCR_NS="$NS" GHCR_ARCH="$ARCH" GHCR_TOKEN="$TOKEN" GHCR_USER="${{ github.actor }}" \
-            sh mirror/ghcr-fetch "$url" /tmp/wrapper.db
-          cmp /tmp/wrapper.db /tmp/pull/base.db && echo "wrapper byte-identical"
-          sha256sum /tmp/wrapper.db | cut -c1-24
+            sh mirror/ghcr-fetch "$url" /tmp/client.db
+          cmp /tmp/client.db /tmp/pull/base.db && echo "client byte-identical"
+          sha256sum /tmp/client.db | cut -c1-24
 
-          echo "--- the wrapper, anonymously, as a shipped image would ---"
-          if GHCR_NS="$NS" GHCR_ARCH="$ARCH" sh mirror/ghcr-fetch "$url" /tmp/wrapper-anon.db 2>/tmp/anon.err; then
-            cmp /tmp/wrapper-anon.db /tmp/pull/base.db && echo "anonymous pull byte-identical"
+          echo "--- client, anonymously ---"
+          if GHCR_NS="$NS" GHCR_ARCH="$ARCH" sh mirror/ghcr-fetch "$url" /tmp/client-anon.db 2>/tmp/anon.err; then
+            cmp /tmp/client-anon.db /tmp/pull/base.db && echo "anonymous pull byte-identical"
           else
-            echo "anonymous pull unavailable: $(cat /tmp/anon.err)" \
-              "(the package needs to be public; a one-time setting)"
+            echo "anonymous pull unavailable: $(cat /tmp/anon.err)"
           fi

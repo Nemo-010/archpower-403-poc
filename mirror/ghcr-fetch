@@ -1,16 +1,26 @@
 #!/bin/sh
+# SPDX-License-Identifier: 0BSD
 #
-# ghcr-fetch - pacman's XferCommand, served from a GHCR mirror of an ArchPOWER
-# repository. Nothing here talks to the origin; a real Chromium puts the bytes
-# in the registry once a week (mirror/sync.sh), and this reads them back.
+# pacman XferCommand that reads a mirrored ArchPOWER repository from an OCI
+# registry instead of from the origin.
 #
 #   XferCommand = /usr/bin/ghcr-fetch %u %o
 #
-# The mirrorlist keeps upstream's own Server lines, so %u looks like
-# https://repo.archlinuxpower.org/<repo>/<arch>/<file>; only the path is used.
-# The artifact is ghcr.io/<NS>/archpower-<repo>:<arch>.
+# The mirrorlist keeps upstream's own Server lines, so %u is the origin URL and
+# only its path is used: /<repo>/<arch>/<file>. The artifact is
+# ghcr.io/<NS>/archpower-<repo>:<arch>.
 #
-# Config: /etc/ghcr-mirror.conf is sourced and may set NS and GHCR_HOST.
+# The file is located through index.tsv inside the artifact and retrieved by
+# digest, then checked against the sha256 the index carries.
+#
+# Config: /etc/ghcr-mirror.conf is sourced and may set NS, GHCR_HOST and ARCH.
+#   NS          registry namespace (required)
+#   GHCR_HOST   registry host (default: ghcr.io)
+#   ARCH        this image's architecture. Required only because packages for
+#               the `any` architecture are mirrored inside the architecture's
+#               own artifact.
+#
+# Env overrides: GHCR_NS, GHCR_ARCH, GHCR_TOKEN, GHCR_USER.
 set -eu
 
 [ $# -ge 2 ] || { echo "usage: ghcr-fetch <url> <out>" >&2; exit 2; }
@@ -25,7 +35,7 @@ ARCH=""
 [ -n "${GHCR_ARCH:-}" ] && ARCH="$GHCR_ARCH"
 [ -n "$NS" ] || { echo "ghcr-fetch: NS is not set (see /etc/ghcr-mirror.conf)" >&2; exit 2; }
 
-# /<repo>/<arch>/<file>, however the Server line was spelled.
+# /<repo>/<arch>/<file>
 path="${url#*://}"
 path="${path#*/}"
 repo="${path%%/*}"
@@ -35,21 +45,18 @@ file="${rest#*/}"
 [ -n "$repo" ] && [ -n "$arch" ] && [ -n "$file" ] && [ "$file" != "$rest" ] \
   || { echo "ghcr-fetch: cannot parse $url" >&2; exit 2; }
 
-# The `any` repository is mirrored inside the architecture's own artifact, so
-# the image names its architecture instead of a second artifact existing.
 tag="$arch"
 key="$repo/$arch"
 if [ "$arch" = "any" ]; then
-  [ -n "$ARCH" ] || { echo "ghcr-fetch: an `any` path needs ARCH in /etc/ghcr-mirror.conf" >&2; exit 2; }
+  [ -n "$ARCH" ] || { echo "ghcr-fetch: an any path needs ARCH in /etc/ghcr-mirror.conf" >&2; exit 2; }
   tag="$ARCH"
 fi
 
 name="archpower-$repo"
 api="https://$GHCR_HOST/v2/$NS/$name"
 
-# Either an anonymous pull (a public mirror, what an image does) or a token
-# exchanged for a scoped one; a raw GitHub token is not itself a registry
-# bearer and the registry answers 403 if it is sent as one.
+# Anonymous for a public mirror, or a GitHub token exchanged for a registry
+# token. A GitHub token is not itself a registry bearer.
 scope="scope=repository:$NS/$name:pull&service=$GHCR_HOST"
 if [ -n "${GHCR_TOKEN:-}" ]; then
   token="$(curl -fsSL --connect-timeout 10 --max-time 60 \
@@ -61,13 +68,14 @@ else
 fi
 [ -n "$token" ] || { echo "ghcr-fetch: no pull token for $NS/$name" >&2; exit 1; }
 
+# Blob reads redirect to the storage backend, so curl must follow redirects.
 manifest="$(curl -fsSL --connect-timeout 10 --max-time 60 \
   -H "Authorization: Bearer $token" \
   -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
   "$api/manifests/$tag")" \
   || { echo "ghcr-fetch: no mirror $name:$tag" >&2; exit 1; }
 
-# The layer whose title is index.tsv, in whichever order the keys appear.
+# The layer whose title is index.tsv, in whichever order its keys appear.
 idxdig="$(printf '%s' "$manifest" | sed 's/},{/}\n{/g' \
   | grep '"index.tsv"' \
   | sed -n 's/.*"digest":"\([^"]*\)".*/\1/p' | head -1)"
@@ -84,6 +92,5 @@ curl -fsSL --connect-timeout 10 --max-time 600 \
   -H "Authorization: Bearer $token" "$api/blobs/sha256:$sha" -o "$out" \
   || { echo "ghcr-fetch: blob $sha failed" >&2; exit 1; }
 
-# The index is the authority; a truncated or swapped blob is refused here too.
 got="$(sha256sum "$out" | cut -d' ' -f1)"
 [ "$got" = "$sha" ] || { echo "ghcr-fetch: $file sha256 $got != $sha" >&2; exit 1; }

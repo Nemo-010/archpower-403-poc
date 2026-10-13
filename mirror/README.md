@@ -1,44 +1,47 @@
-# A GHCR mirror of an ArchPOWER repository
+# mirror
 
-`repo.archlinuxpower.org` answers **403** with a Cloudflare managed challenge to
-every client it does not like, and it does not like GitHub runners. The origin
-is fine with a residential address; a runner is not. This directory turns "get
-the bytes out of the origin" into a weekly job that uses the one client which
-does get through, and leaves the build and the consumer reading GHCR instead.
+Publish an ArchPOWER repository as an OCI artifact, and serve it to pacman from
+that artifact instead of from the origin.
 
-## Why a real Chromium
+`repo.archlinuxpower.org` returns **403** with a Cloudflare interstitial to
+requests from GitHub-hosted runner address ranges; the same URL and user agent
+return **200** from other networks (measured 2026-10-13). A real Chromium,
+driven through its own network stack, returns 200 from a runner, so it performs
+the retrieval once and the build and the installed system read the registry.
 
-Measured on run `38410453428`, one runner, same IP, all on
-`https://repo.archlinuxpower.org/base/powerpc/base.db`:
+## Client choice
 
-| client | status | bytes | note |
-| --- | ---: | ---: | --- |
-| plain curl | 403 | 5356 | the challenge page |
-| Chromium headless shell | 403 | 0 | `HeadlessChrome/156`, `navigator.webdriver` true |
-| full Chromium, default UA | 403 | 0 | still `HeadlessChrome/156`, still challenged |
-| **full Chromium, real Chrome UA** | **200** | **741171** | byte-identical |
-| full Chromium, real UA + stealth | 200 | 741171 | `navigator.webdriver` gone |
-| curl-impersonate chrome136 | 200 | 741171 | control |
+One runner, one source address, `base.db`, run `38410453428`:
 
-Two things decide it, and both had to be fixed:
+| client | status | bytes |
+| --- | ---: | ---: |
+| plain curl | 403 | 5356 |
+| Chromium headless shell | 403 | 0 |
+| full Chromium, default user agent | 403 | 0 |
+| **full Chromium, Chrome user agent** | **200** | **741171** |
+| curl-impersonate `chrome136` | 200 | 741171 |
+| curl_cffi `chrome` | 200 | 741171 |
+| node-tls-client `chrome_131` | 200 | 741171 |
 
-1. **The user agent.** `HeadlessChrome/...` is challenged; a real `Chrome/...`
-   is not. The TLS stack does not change between those two rows.
-2. **Which stack fetches.** Playwright's `context.request` is its own Node-side
-   client with a non-browser ClientHello; it returns 403 even after the page
-   loaded the origin with no challenge (visible as `title: "Index of /"` with
-   `status: 403`). The fetch must be an **in-page `fetch()`** so Chromium's
-   fingerprint and cookie jar apply.
+Two properties are load-bearing:
 
-## What it produces
+1. The user agent must be a `Chrome/<version>` string; `HeadlessChrome/<version>`
+   receives 403 with the same TLS stack.
+2. The request must be issued by the browser: an in-page `fetch()`. Playwright's
+   request context is a separate Node-side HTTP client and returns 403 for the
+   data request even after the page has loaded the origin.
 
-One OCI artifact per repository/architecture:
+`fetchers/chromium_fetch.mjs` derives its user agent from the running build's
+version, so the user agent, the client hints and the TLS stack agree.
+
+## Artifact
 
 ```
-ghcr.io/<ns>/archpower-<repo>:<arch>
+ghcr.io/<namespace>/archpower-<repo>:<arch>
 ```
 
-holding every file, its detached `.sig`, both databases, and `index.tsv`:
+Contents: both databases and their signatures, every package in the download
+closure and its signature, and `index.tsv`:
 
 ```
 # url-path	filename	sha256	size
@@ -47,61 +50,57 @@ base/any	base-any.db	2df5ce18...	504891
 base/powerpc	acl-2.4.0-1-powerpc.pkg.tar.zst	73f78138...	166581
 ```
 
-Measured for `base/powerpc` + `base/any`: **144 files, 154 MiB**, of which the
-download closure is 142 packages (see `enumerate.py` — `base` here is a real
-metapackage, not a group).
+Measured for `base/powerpc` + `base/any`: 142 packages, 154 MiB, 144 index rows.
 
-## Running it
+## Running
 
 ```sh
-NS=<ghcr-namespace> bash mirror/sync.sh base powerpc      # one repo and arch
-NS=<ns> MAX_FILES=500 bash mirror/sync.sh base powerpc    # a slice, for the
-                                                          # whole repository
+NS=<namespace> bash mirror/sync.sh base powerpc
+
+# a slice of a repository larger than one runner's disk
+NS=<namespace> MAX_FILES=500 bash mirror/sync.sh base powerpc
 ```
 
-The databases are always refetched; `SKIP_FETCH=1` reuses packages already in
-`stage/`, which is what makes a re-run cheap. `.github/workflows/mirror-sync.yml`
-runs it weekly with the stage in the Actions cache, so a slice-per-run schedule
-can cover a repository whose whole sync exceeds a runner's disk.
+The databases are always refetched. `SKIP_FETCH=1` reuses packages already in
+`stage/`, which is what makes a repeated run cheap.
+`.github/workflows/mirror-sync.yml` runs it weekly with `stage/` in the Actions
+cache, so a slice-per-run schedule can cover a whole repository.
 
-Every package is checked twice before it is uploaded: the detached signature
-against the pinned ArchPOWER keyring in `keys/`, and its sha256 against the
-value the database carries.
+Each package is checked twice before it is published: its detached signature
+against the pinned keyring in `keys/`, and its sha256 against the value the
+database carries.
 
-## The consumer side
+## Client side
 
-`ghcr-fetch` is a pacman `XferCommand`:
+`ghcr-fetch` is a `XferCommand`:
 
 ```
 XferCommand = /usr/bin/ghcr-fetch %u %o
 ```
 
 It keeps upstream's `Server` lines, so `%u` is the origin URL and only the path
-is used; `/etc/ghcr-mirror.conf` names the namespace and the image's own
-architecture (needed because `any` packages are mirrored inside the
-architecture's artifact). It reads `index.tsv` out of the artifact, pulls one
-blob by digest, and re-checks the sha256 — a truncated or swapped blob is
-refused even though the transport is a registry rather than the signed origin.
-Blob reads are 307s to the storage backend, so the curl calls follow redirects.
+is used. `/etc/ghcr-mirror.conf` names the namespace and the image's own
+architecture, because `any` packages are mirrored inside the architecture's
+artifact. The file is located through `index.tsv` and retrieved by digest, then
+checked against the sha256 in the index, so a truncated or replaced blob is
+rejected even though the transport is a registry rather than the signed origin.
+Blob reads redirect to the storage backend, so the curl calls follow redirects.
 
-Verified end to end on the runner and locally: cold `oras pull` of 289 files,
-`gpg` signature GOOD, and `ghcr-fetch` returning `base.db` **byte-identical**
-both with a token and anonymously. The epoch filename (`zlib-1:1.3.2-…`), a
-`+`-bearing filename, and the `base/any` path all pull.
+Verified on a runner and locally: a cold `oras pull` of 289 files, `gpg`
+signature GOOD, and `ghcr-fetch` returning `base.db` byte-identical both with a
+token and anonymously. An epoch filename (`zlib-1:1.3.2-…`), a `+`-bearing
+filename and the `base/any` path all retrieve.
 
-Two notes for a build that uses this instead of the origin:
+Notes:
 
-- Staging escapes a `:` in a filename (Arch epochs put one there, and `oras`
-  reads `path:type`), so the layer titles are not the real names. `index.tsv`
-  is, and pulls are by digest, so nothing depends on the title.
-- The package has to be **public** for the shipped wrapper to pull anonymously.
+- Staging escapes `:` in a filename, because an Arch epoch puts one there and
+  `oras` reads `path:type`. `index.tsv` carries the real name and retrieval is
+  by digest, so nothing depends on the layer title.
+- The package must be public for an anonymous pull.
 
 ## Limits
 
-- This is a mirror of a repository the origin publishes; redistribution is the
-  origin's call and worth a yes before it is wired into anything shipped.
-- The sync leg is still circumvention — the arms race did not go away, it moved
-  into one weekly job where a break costs freshness and not a build. A real
-  Chromium is the leg that does not need a synthesised signature maintained.
-- `SKIP_FETCH` trades freshness for speed on purpose; the databases never come
-  from the cache, so the closure a run resolves is always current.
+- `SKIP_FETCH` trades freshness for speed by design; the databases never come
+  from the cache, so the closure a run resolves is current.
+- A slice run publishes a partial artifact. A client pulling a file that is not
+  in the current slice sees it as absent.

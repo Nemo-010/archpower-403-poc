@@ -1,8 +1,7 @@
 node_modules/
-*.log
-base.db
-base.db.sig
-fetch-summary.tsv
-.cache/
 stage/
 stage-*/
+.cache/
+*.log
+__pycache__/
+*.pyc

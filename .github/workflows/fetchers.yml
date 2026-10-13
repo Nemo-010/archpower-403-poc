@@ -1,0 +1,67 @@
+name: fetchers
+# SPDX-License-Identifier: 0BSD
+#
+# Run every fetcher against one URL from a runner and report which returns 200.
+# This is the probe that shows a change at the origin or in a client version
+# before a job depends on it.
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: URL to retrieve
+        default: https://repo.archlinuxpower.org/base/powerpc/base.db
+  schedule:
+    - cron: "43 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install the Node clients
+        run: |
+          npm i --no-audit --no-fund playwright@latest node-tls-client@2.1.0
+          npx playwright install --with-deps chromium
+
+      - name: Install curl_cffi
+        run: python3 -m pip install --quiet curl_cffi
+
+      - name: Install curl-impersonate
+        run: |
+          curl -fsSL --max-time 120 -o /tmp/ci.tar.gz \
+            https://github.com/lexiforest/curl-impersonate/releases/download/v2.2.3/curl-impersonate-v2.2.3.x86_64-linux-gnu.tar.gz
+          mkdir -p /opt/curl-impersonate
+          tar -xzf /tmp/ci.tar.gz -C /opt/curl-impersonate
+          chmod +x /opt/curl-impersonate/*
+
+      - name: Source address
+        run: curl -sSL --max-time 30 https://ipinfo.io/json
+
+      - name: Status of each client
+        env:
+          URL: ${{ inputs.url || 'https://repo.archlinuxpower.org/base/powerpc/base.db' }}
+        run: |
+          set -u
+          run() {
+            name=$1; shift
+            out="/tmp/$name.bin"; err="/tmp/$name.err"; rm -f "$out" "$err"
+            if "$@" >/dev/null 2>"$err"; then
+              printf '%-18s ok   %10s bytes  sha256=%s\n' \
+                "$name" "$(wc -c < "$out")" "$(sha256sum "$out" | cut -c1-16)"
+            else
+              printf '%-18s fail %s\n' "$name" "$(tail -1 "$err" 2>/dev/null || echo '-')"
+            fi
+          }
+          run plain-curl       curl -fsSL --connect-timeout 10 --max-time 180 -o /tmp/plain-curl.bin "$URL"
+          run chromium         node fetchers/chromium_fetch.mjs "$URL" /tmp/chromium.bin
+          run curl-impersonate env CURL_IMPERSONATE_DIR=/opt/curl-impersonate sh fetchers/curl_impersonate_fetch.sh "$URL" /tmp/curl-impersonate.bin
+          run curl-cffi        python3 fetchers/curl_cffi_fetch.py "$URL" /tmp/curl-cffi.bin
+          run tls-client       node fetchers/tls_client_fetch.mjs "$URL" /tmp/tls-client.bin
