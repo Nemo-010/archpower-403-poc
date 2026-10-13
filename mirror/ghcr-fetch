@@ -47,11 +47,16 @@ fi
 name="archpower-$repo"
 api="https://$GHCR_HOST/v2/$NS/$name"
 
+# Either an anonymous pull (a public mirror, what an image does) or a token
+# exchanged for a scoped one; a raw GitHub token is not itself a registry
+# bearer and the registry answers 403 if it is sent as one.
+scope="scope=repository:$NS/$name:pull&service=$GHCR_HOST"
 if [ -n "${GHCR_TOKEN:-}" ]; then
-  token="$GHCR_TOKEN"
-else
   token="$(curl -fsS --connect-timeout 10 --max-time 60 \
-    "https://$GHCR_HOST/token?scope=repository:$NS/$name:pull&service=$GHCR_HOST" \
+    -u "${GHCR_USER:-oauth2}:$GHCR_TOKEN" "https://$GHCR_HOST/token?$scope" \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
+else
+  token="$(curl -fsS --connect-timeout 10 --max-time 60 "https://$GHCR_HOST/token?$scope" \
     | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
 fi
 [ -n "$token" ] || { echo "ghcr-fetch: no pull token for $NS/$name" >&2; exit 1; }

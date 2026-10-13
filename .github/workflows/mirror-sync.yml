@@ -71,6 +71,15 @@ jobs:
           bash mirror/sync.sh "$REPO" "$ARCH"
           echo "NS=$NS" >> "$GITHUB_ENV"
 
+      - name: Make the mirror public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # The shipped wrapper pulls anonymously, so the artifact has to be
+          # public; this is the one-time setting that makes that true.
+          gh api --method PATCH "/user/packages/container/archpower-$REPO" \
+            -f visibility=public && echo "visibility: public" || echo "visibility unchanged"
+
       - name: Verify from a cold pull
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -88,7 +97,11 @@ jobs:
           echo "--- the wrapper, against the same registry ---"
           cd "$GITHUB_WORKSPACE"
           url="https://repo.archlinuxpower.org/$REPO/$ARCH/base.db"
-          GHCR_NS="$NS" GHCR_ARCH="$ARCH" GHCR_TOKEN="$TOKEN" \
+          GHCR_NS="$NS" GHCR_ARCH="$ARCH" GHCR_TOKEN="$TOKEN" GHCR_USER="${{ github.actor }}" \
             sh mirror/ghcr-fetch "$url" /tmp/wrapper.db
           cmp /tmp/wrapper.db /tmp/pull/base.db && echo "wrapper byte-identical"
           sha256sum /tmp/wrapper.db | cut -c1-24
+
+          echo "--- the wrapper, anonymously, as a shipped image would ---"
+          GHCR_NS="$NS" GHCR_ARCH="$ARCH" sh mirror/ghcr-fetch "$url" /tmp/wrapper-anon.db
+          cmp /tmp/wrapper-anon.db /tmp/pull/base.db && echo "anonymous pull byte-identical"
