@@ -93,15 +93,18 @@ engine_available() {
 }
 
 download_with() { # engine url out
+  local e="$WORK/err.$1"
   case "$1" in
-    curl-impersonate) "$CI_DIR/curl_chrome136" -fsSL --max-time 180 -o "$3" "$2" >/dev/null 2>&1 ;;
-    curl-cffi)        "$PYTHON" "$HERE/curl_cffi_fetch.py" "$2" "$3" >/dev/null 2>&1 ;;
-    tls-client)       node "$HERE/tls_client_fetch.mjs" "$2" "$3" >/dev/null 2>&1 ;;
-    workerd)          bash "$HERE/workerd_fetch.sh" "$2" "$3" >/dev/null 2>&1 ;;
-    relay)            node "$HERE/relay_fetch.mjs" "$2" "$3" >/dev/null 2>&1 ;;
+    curl-impersonate) "$CI_DIR/curl_chrome136" -fsSL --max-time 180 -o "$3" "$2" >/dev/null 2>"$e" ;;
+    curl-cffi)        "$PYTHON" "$HERE/curl_cffi_fetch.py" "$2" "$3" >/dev/null 2>"$e" ;;
+    tls-client)       node "$HERE/tls_client_fetch.mjs" "$2" "$3" >/dev/null 2>"$e" ;;
+    workerd)          bash "$HERE/workerd_fetch.sh" "$2" "$3" >/dev/null 2>"$e" ;;
+    relay)            node "$HERE/relay_fetch.mjs" "$2" "$3" >/dev/null 2>"$e" ;;
     *) return 127 ;;
   esac
 }
+
+engine_err() { [ -s "$WORK/err.$1" ] && tail -1 "$WORK/err.$1" | tr '\t\n' '  ' | cut -c1-140; }
 
 accept_ok() { # sigreason
   case "$1" in
@@ -134,8 +137,8 @@ for engine in $ENGINE_ORDER; do
   while [ "$attempt" -le "$RETRIES" ]; do
     db="$WORK/db.$engine"
     if ! download_with "$engine" "$DB_URL" "$db"; then
-      row "$engine	db	download-failed	-	-	0	attempt=$attempt"
-      say "$engine: download failed (attempt $attempt)"
+      row "$engine	db	download-failed	-	-	0	attempt=$attempt err=$(engine_err "$engine")"
+      say "$engine: download failed (attempt $attempt): $(engine_err "$engine")"
       attempt=$((attempt + 1)); sleep $((attempt * 5)); continue
     fi
     reason="$(validate_db "$db")"

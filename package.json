@@ -1,0 +1,28 @@
+{
+  "name": "poc",
+  "version": "1.0.0",
+  "description": "Reproduces and explains the `403` that `pkgforge-dev/docker-archlinux` hit fetching `https://repo.archlinuxpower.org/base/powerpc/base.db` (`kth5/archpower#160`).",
+  "main": "worker.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nemo-010/archpower-403-poc.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Nemo-010/archpower-403-poc/issues"
+  },
+  "homepage": "https://github.com/Nemo-010/archpower-403-poc#readme",
+  "dependencies": {
+    "node-tls-client": "^2.1.0",
+    "playwright": "^1.64.0"
+  },
+  "allowScripts": {
+    "koffi@2.16.3": true
+  }
+}

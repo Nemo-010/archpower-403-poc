@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Engine: node-tls-client (Go uTLS) — a TLS stack independent of BoringSSL/OpenSSL.
 import fs from "node:fs";
-import { Session } from "node-tls-client";
+import { initTLS, destroyTLS, Session } from "node-tls-client";
 
 const [, , url, out] = process.argv;
 if (!url || !out) {
@@ -9,7 +9,8 @@ if (!url || !out) {
   process.exit(2);
 }
 
-const session = new Session({ clientIdentifier: "chrome_136" });
+await initTLS();
+const session = new Session({ clientIdentifier: "chrome_131" });
 try {
   const r = await session.get(url, { timeout: 120 });
   if (r.status !== 200) {
@@ -24,4 +25,5 @@ try {
   fs.writeFileSync(out, buf);
 } finally {
   try { await session.close(); } catch {}
+  try { await destroyTLS(); } catch {}
 }
