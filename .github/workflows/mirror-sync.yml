@@ -79,7 +79,8 @@ jobs:
           REF="ghcr.io/$NS/archpower-$REPO:$ARCH"
           mkdir -p /tmp/pull && cd /tmp/pull
           oras pull "$REF"
-          echo "--- pulled ---"; ls -la | head
+          echo "--- pulled: $(ls -1 | wc -l) files ---"
+          ls -la base.db base.db.sig index.tsv
           gpg --batch --import "$GITHUB_WORKSPACE/mirror/keys/archpower.gpg" 2>/dev/null
           gpg --batch --verify base.db.sig base.db && echo "database signature: GOOD"
           echo "index rows: $(($(wc -l < index.tsv) - 1))"
